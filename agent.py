@@ -1,17 +1,3 @@
-#!/usr/bin/env python3
-"""
-agent.py - Agent-as-Coder main script
-
-Usage:
-  python agent.py --target icici
-
-Behaviour:
- - Reads data/<target>/* (expects one PDF and one CSV)
- - If OPENAI_API_KEY present, uses LLM loop to generate parser -> custom_parsers/<target>_parser.py
- - Runs the generated parser's parse(pdf_path) and compares to sample CSV (DataFrame.equals)
- - If fails, sends traceback back to LLM and retries up to 3 attempts
- - If no API key, tries a heuristic parser generator (pdfplumber-based)
-"""
 import os
 import argparse
 import importlib.util
@@ -22,17 +8,14 @@ import textwrap
 import pandas as pd
 from pathlib import Path
 
-# If you want OpenAI usage:
 try:
-    import openai
+    from google import genai
 except Exception:
-    openai = None
+    genai = None
 
 MAX_ATTEMPTS = 3
 
-# -------------------------
 # Helpers
-# -------------------------
 def find_sample_files(target):
     base = Path("data") / target
     if not base.exists():
@@ -66,15 +49,15 @@ def import_parse_function(module_path, module_name):
     return module.parse
 
 def normalize_df_for_compare(df, expected_df):
-    # Best-effort normalize: same columns order, strip whitespace, convert NaNs -> ""
+    
     df2 = df.copy()
     df2 = df2.reset_index(drop=True)
-    # Ensure all expected columns exist in df2; if not, add empty columns
+    
     for c in expected_df.columns:
         if c not in df2.columns:
             df2[c] = ""
     df2 = df2[expected_df.columns]
-    # convert to string and strip whitespace for comparison
+    
     df2 = df2.fillna("").astype(str).apply(lambda s: s.str.strip())
     exp = expected_df.fillna("").astype(str).apply(lambda s: s.str.strip())
     exp = exp.reset_index(drop=True)[df2.columns]
@@ -93,49 +76,43 @@ def run_parse_and_test(parser_path, pdf_path, csv_path, module_name="gen_parser"
     equal = got.equals(exp)
     return equal, got, exp
 
-# -------------------------
-# LLM helpers (OpenAI)
-# -------------------------
 def llm_is_available():
-    return (openai is not None) and (os.environ.get("OPENAI_API_KEY") is not None)
+    return (genai is not None) and (os.environ.get("Gemini_API_KEY") is not None)
 
 def clean_code_from_response(text):
-    # Strip triple backticks or markdown fences if present
     if text.startswith("```"):
-        # remove leading fences
-        # support ```python or ```
+       
         idx = text.find("\n")
         if idx != -1 and text[:3] == "```":
-            # if fence has language spec, drop first line
+           
             if text[:6].startswith("```py") or text[:8].startswith("```python"):
-                # remove initial fence line
+                
                 first_newline = text.find("\n")
                 text = text[first_newline+1:]
-        # remove trailing fence if present
+        
         if text.rstrip().endswith("```"):
             text = text.rstrip()[:-3]
     return text.strip()
 
-def call_openai_generate_module(system_prompt, user_prompt, model=None, max_tokens=1500):
-    if openai is None:
-        raise RuntimeError("openai package not installed")
-    key = os.environ.get("OPENAI_API_KEY")
+def call_genai_generate_module(system_prompt, user_prompt, model=None, max_tokens=1500):
+    if genai is None:
+        raise RuntimeError("genai package not installed")
+    key = os.environ.get("Gemini_API_KEY")
     if not key:
-        raise RuntimeError("OPENAI_API_KEY not set")
-    openai.api_key = key
-    model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        raise RuntimeError("Gemini_API_KEY not set")
+    genai.api_key = key
+    model = model or os.environ.get("Gemini_AI_MODEL", "2.5")
     # messages pattern
     messages = [
         {"role":"system", "content": system_prompt},
         {"role":"user", "content": user_prompt}
     ]
-    resp = openai.ChatCompletion.create(model=model, messages=messages, temperature=0.0, max_tokens=max_tokens)
+    resp = genai.ChatCompletion.create(model=model, messages=messages, temperature=0.0, max_tokens=max_tokens)
     text = resp["choices"][0]["message"]["content"]
     return clean_code_from_response(text)
 
-# -------------------------
 # Heuristic parser generator
-# -------------------------
+
 def make_heuristic_parser_code(target, expected_df):
     cols = list(expected_df.columns)
     cols_repr = repr(cols)
@@ -198,9 +175,7 @@ def parse(pdf_path: str) -> pd.DataFrame:
 '''
     return textwrap.dedent(template)
 
-# -------------------------
 # Main agent loop
-# -------------------------
 def run_agent(target):
     print(f"[agent] target={target}")
     pdf_path, csv_path = find_sample_files(target)
@@ -211,7 +186,7 @@ def run_agent(target):
 
     # If LLM available -> use LLM loop
     if llm_is_available():
-        print("[agent] OpenAI API detected: using LLM generation loop")
+        print("[agent] GENAI API detected: using LLM generation loop")
         system_prompt = (
             "You are an assistant that writes a Python module file implementing a parser for a bank statement PDF.\n"
             "Produce only valid Python code for a module file (no explanations, no markdown). The module MUST define:\n"
@@ -248,7 +223,7 @@ Provide only the Python module source.
             else:
                 user_prompt = prompt
             try:
-                code = call_openai_generate_module(system_prompt, user_prompt)
+                code = call_genai_generate_module(system_prompt, user_prompt)
             except Exception as e:
                 raise RuntimeError("LLM call failed: " + str(e))
             write_module(module_path, code)
@@ -271,7 +246,7 @@ Provide only the Python module source.
         return False
     else:
         # Heuristic fallback
-        print("[agent] No OPENAI_API_KEY found or openai package unavailable: using heuristic parser generator.")
+        print("[agent] No GENAI_API_KEY found or genai package unavailable: using heuristic parser generator.")
         code = make_heuristic_parser_code(target, expected_df)
         write_module(module_path, code)
         try:
@@ -286,9 +261,8 @@ Provide only the Python module source.
             print("[agent] Heuristic parser raised an exception while testing:", str(e))
             return False
 
-# -------------------------
 # CLI
-# -------------------------
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True, help="target bank folder name under data/ (e.g., icici)")
