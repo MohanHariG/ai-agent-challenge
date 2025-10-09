@@ -1,0 +1,5 @@
+pandas
+openai
+pdfplumber
+python-dotenv
+pytest
